@@ -462,7 +462,14 @@ td.num { font-variant-numeric: tabular-nums; text-align: right; }
   z-index: 60; font-size: 13px; max-width: calc(100vw - 40px);
 }
 
-video { width: 100%; max-width: 100%; border: 1px solid var(--line); background: var(--surface-3); }
+video {
+  width: 100%;
+  max-width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  background: var(--surface-3);
+}
 
 .splash {
   min-height: 52vh;

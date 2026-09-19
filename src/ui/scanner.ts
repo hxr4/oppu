@@ -21,10 +21,11 @@ export function scannerView(ctx: AppCtx): HTMLElement {
 
   const verdictHost = h('div', { class: 'panel__body' });
   const queueHost = h('div', { class: 'panel__body' });
-  const cameraHost = h('div', {});
+  const cameraHost = h('div', {}); 
+  const camStatus = h('div', { class: 'note' });
   let stream: MediaStream | null = null;
   let scanning = false;
-  let raf = 0;
+  let loopTimer = 0;
 
   const pasteBox = h('textarea', {
     id: 'oppu-paste',
@@ -122,57 +123,110 @@ export function scannerView(ctx: AppCtx): HTMLElement {
     queueHost.appendChild(rows);
   }
 
+  const MAX_SCAN_EDGE = 720;
+
   async function startCamera(): Promise<void> {
     if (scanning) return stopCamera();
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-    } catch {
-      toast('No camera available here — use the hand-over or paste route.');
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+      });
+    } catch (err) {
+      const e = err as { name?: string; message?: string };
+      const why =
+        e.name === 'NotAllowedError' ? 'camera permission was refused'
+          : e.name === 'NotFoundError' ? 'this device reports no camera'
+            : e.name === 'NotReadableError' ? 'the camera is already in use by another app'
+              : e.name === 'SecurityError' ? 'the browser blocked the camera on this page'
+                : e.message ?? 'unknown error';
+      camStatus.textContent = `Camera unavailable: ${why}.`;
+      toast(`Camera unavailable: ${why}.`);
       return;
     }
+
     scanning = true;
-    const video = h('video', { autoplay: true, muted: true, playsInline: true }) as HTMLVideoElement;
+    const video = document.createElement('video');
+    video.setAttribute('playsinline', '');
+    video.setAttribute('muted', '');
+    video.setAttribute('autoplay', '');
+    video.muted = true;
     video.srcObject = stream;
     clear(cameraHost);
     cameraHost.appendChild(video);
-    await video.play().catch(() => undefined);
+
+    try {
+      await video.play();
+    } catch {
+      camStatus.textContent = 'The browser refused to start the preview. Tap the video once.';
+    }
 
     const canvas = document.createElement('canvas');
     const g = canvas.getContext('2d', { willReadFrequently: true });
-    const Detector = (window as unknown as { BarcodeDetector?: new (o: { formats: string[] }) => BarcodeDetectorLike }).BarcodeDetector;
+    const Detector = (window as unknown as {
+      BarcodeDetector?: new (o: { formats: string[] }) => BarcodeDetectorLike;
+    }).BarcodeDetector;
     const detector = Detector ? new Detector({ formats: ['qr_code'] }) : null;
+
+    let frames = 0;
+    const engine = detector ? 'BarcodeDetector' : 'jsQR';
 
     const loop = async (): Promise<void> => {
       if (!scanning) return;
-      if (video.videoWidth) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        g?.drawImage(video, 0, 0);
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+
+      if (vw && vh && g) {
+        frames += 1;
+        const scale = Math.min(1, MAX_SCAN_EDGE / Math.max(vw, vh));
+        canvas.width = Math.round(vw * scale);
+        canvas.height = Math.round(vh * scale);
+        g.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        const t0 = performance.now();
         let text: string | null = null;
+
         if (detector) {
-          const found = await detector.detect(canvas).catch(() => []);
+          const found = await detector.detect(video).catch(() => [] as { rawValue: string }[]);
           text = found[0]?.rawValue ?? null;
-        } else if (g) {
+          if (!text) {
+            const viaCanvas = await detector.detect(canvas).catch(() => [] as { rawValue: string }[]);
+            text = viaCanvas[0]?.rawValue ?? null;
+          }
+        } else {
           const frame = g.getImageData(0, 0, canvas.width, canvas.height);
           text = decodeFrame(frame.data, canvas.width, canvas.height);
         }
+
+        const ms = Math.round(performance.now() - t0);
+        camStatus.textContent =
+          `Scanning with ${engine} · camera ${vw}\u00d7${vh}, decoding at ${canvas.width}\u00d7${canvas.height} · ${ms} ms per frame · ${frames} frames`;
+
         if (text) {
           stopCamera();
           await runVerify(text, 'camera');
           return;
         }
+      } else {
+        camStatus.textContent = 'Waiting for the camera to start\u2026';
       }
-      raf = requestAnimationFrame(() => void loop());
+
+      loopTimer = window.setTimeout(() => void loop(), 80);
     };
+
     void loop();
   }
 
   function stopCamera(): void {
     scanning = false;
-    cancelAnimationFrame(raf);
+    window.clearTimeout(loopTimer);
     stream?.getTracks().forEach((t) => t.stop());
     stream = null;
     clear(cameraHost);
+    camStatus.textContent = '';
   }
 
   const clockRow = h('div', { class: 'field' });

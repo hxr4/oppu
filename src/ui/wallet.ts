@@ -46,7 +46,7 @@ export function walletView(ctx: AppCtx): HTMLElement {
     const proof = await makeProof(student.credential, student.status, student.deviceKeys.privateKey, now);
     currentProof = proof;
     const text = proofToText(proof);
-    const { d, count } = qrPath(text, 'M');
+    const { d, count } = qrPath(text, 'L');
     const phrase = await checkPhrase(proof);
 
     clear(qrHost);
