@@ -30,11 +30,12 @@ function chainDiagram(): SVGElement {
     s('path', { d: 'M605 150 L605 196', stroke: 'var(--accent)', fill: 'none', 'stroke-width': '1.4' }),
     s('path', { d: 'M601 190 L605 196 L609 190', stroke: 'var(--accent)', fill: 'none', 'stroke-width': '1.4' }),
     s('text', { x: 613, y: 178, fill: 'var(--accent)', 'font-size': '10', 'font-family': 'var(--mono)' }, 'signs the clock'),
-    box(510, 196, 190, 'Proof, 229 bytes', 'valid for 30 seconds'),
-    s('text', { x: 0, y: 130, fill: 'var(--ink-2)', 'font-size': '11.5' }, 'A scanner carries the root key and'),
-    s('text', { x: 0, y: 148, fill: 'var(--ink-2)', 'font-size': '11.5' }, 'a signed revocation digest — under'),
-    s('text', { x: 0, y: 166, fill: 'var(--ink-2)', 'font-size': '11.5' }, 'two kilobytes. That is the whole'),
-    s('text', { x: 0, y: 184, fill: 'var(--ink-2)', 'font-size': '11.5' }, 'trust anchor for the entire state.'),
+    box(510, 196, 190, 'Proof, 297 bytes', 'valid for 30 seconds'),
+    s('text', { x: 0, y: 122, fill: 'var(--ink-2)', 'font-size': '11.5' }, 'A scanner carries the root key, the'),
+    s('text', { x: 0, y: 140, fill: 'var(--ink-2)', 'font-size': '11.5' }, 'institution keys and a short emergency'),
+    s('text', { x: 0, y: 158, fill: 'var(--ink-2)', 'font-size': '11.5' }, 'list — under two kilobytes, and it stays'),
+    s('text', { x: 0, y: 176, fill: 'var(--ink-2)', 'font-size': '11.5' }, 'that size however many students'),
+    s('text', { x: 0, y: 194, fill: 'var(--ink-2)', 'font-size': '11.5' }, 'Kerala has.'),
   );
 }
 
@@ -63,6 +64,25 @@ export function methodView(): HTMLElement {
           'current half-minute with a key that was generated non-extractable inside the phone and has never left it. ' +
           'A screenshot carries a stale signature; a copied credential carries the wrong key. Both are rejected by ' +
           'arithmetic rather than by a conductor’s judgement.'),
+        h('h3', {}, 'Why revocation is starvation, not a list'),
+        h('p', {},
+          'Shipping every revoked serial to every bus grows without limit; at state scale it is hundreds of kilobytes ' +
+          'that must reach five thousand vehicles. So the pass carries its own recency instead: its institution signs ' +
+          'a 68-byte "not revoked as of today" token whenever the wallet has a network, and a scanner refuses anything ' +
+          'older than seven days. Revoking a pass means declining to sign it again — nothing is distributed to anybody, ' +
+          'and the bus carries the same two kilobytes whatever the state\u2019s size. The signed list survives, shrunk ' +
+          'to its real job: same-day emergency revocation of a handful of serials.'),
+        h('h3', {}, 'Why the scanner does not trust its own clock'),
+        h('p', {},
+          'Everything above rests on the device knowing what time it is, and a conductor phone with a wrong wall clock ' +
+          'would reject a whole depot\u2019s students. At each depot sync the authority hands the device a signed ' +
+          'timestamp; from then on the device tells time by that beacon plus its own monotonic counter and treats the ' +
+          'operating-system clock as a suggestion. The attack bench has both cases side by side.'),
+        h('h3', {}, 'Why the conductor signs too'),
+        h('p', {},
+          'A receipt is only worth what its signature is worth. The conductor\u2019s device key is itself countersigned ' +
+          'by the authority root, so a receipt proves which enrolled device wrote it, and auditing the ledger is a ' +
+          'signature check over the batch rather than an inspection of a depot\u2019s paperwork.'),
         h('h3', {}, 'Why a check phrase'),
         h('p', {},
           'Two words derived from the exact bytes scanned, shown on both screens. If a student is relaying somebody ' +
@@ -86,7 +106,9 @@ export function methodView(): HTMLElement {
         h('h3', {}, 'Real'),
         h('ul', {},
           h('li', {}, 'Every signature is ECDSA P-256 with SHA-256 through the browser’s own WebCrypto. Nothing is simulated.'),
-          h('li', {}, 'Student device keys are generated non-extractable, so the private key genuinely cannot leave the browser.'),
+          h('li', {}, 'Student device keys are generated non-extractable and kept in IndexedDB, so a pass survives a reload with the same device identity and its private key never becomes serialisable.'),
+          h('li', {}, 'A service worker caches the shell, so after one visit the page opens with the network off — try aeroplane mode.'),
+          h('li', {}, 'The scale figures for proof, status token, receipt and trust-anchor size are measured from the structures this build encodes, not estimated.'),
           h('li', {}, 'The QR carries the real 229-byte envelope and is decoded by a bundled scanner, not a stub.'),
           h('li', {}, 'The attack bench builds each forgery live with fresh keys, then runs the same verifier the scanner uses.'),
           h('li', {}, 'District boundaries and the 83 depot towns are real geography.'),
@@ -102,7 +124,8 @@ export function methodView(): HTMLElement {
         h('h3', {}, 'What production needs'),
         h('ul', {},
           h('li', {}, 'An issuance flow inside the existing institution portal, so a pass is a signature on an enrolment record that already exists.'),
-          h('li', {}, 'The revocation digest distributed with the daily waybill sync, and over SMS where there is no data.'),
+          h('li', {}, 'Status tokens delivered through the institution portal and any campus wifi, with the emergency list riding the daily waybill sync.'),
+          h('li', {}, 'A biometric or PIN gate on the wallet, so handing over an unlocked phone stops being the one attack that works.'),
           h('li', {}, 'Key rotation and an expiry on the root, so a compromised institution key is a dated problem rather than a permanent one.'),
           h('li', {}, 'A printed fallback pass with the same serial for students without a smartphone — the ledger must not exclude them.'),
         ),

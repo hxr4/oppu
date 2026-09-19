@@ -9,6 +9,7 @@ export interface AppCtx {
   handoff: { proof: Uint8Array; student: Student; mintedAt: number } | null;
   walletStudentId: string;
   refresh: () => void;
+  save: () => void;
 }
 
 export function panel(
@@ -38,26 +39,29 @@ export function tile(n: string, label: string): HTMLElement {
   return h('div', { class: 'tile' }, h('div', { class: 'tile__n' }, n), h('div', { class: 'tile__l' }, label));
 }
 
-export function stepList(result: VerifyResult): HTMLElement {
-  const wrap = h('div', { class: 'steps' });
-  for (const s of result.steps) {
+export function stepList(result: VerifyResult, reveal = false): HTMLElement {
+  const wrap = h('div', { class: reveal ? 'steps steps--reveal' : 'steps' });
+  result.steps.forEach((s, i) => {
     wrap.appendChild(
       h(
         'div',
-        { class: 'step' },
+        { class: 'step', style: reveal ? `animation-delay:${i * 70}ms` : '' },
         h('div', { class: `step__glyph step__glyph--${s.pass ? 'ok' : 'bad'}` }, s.pass ? '✓' : '✗'),
         h('div', {}, h('div', { class: 'step__title' }, s.title), h('div', { class: 'step__detail' }, s.detail)),
       ),
     );
-  }
+  });
   return wrap;
 }
 
-export function verdictBox(result: VerifyResult, extra?: string): HTMLElement {
+export function verdictBox(result: VerifyResult, extra?: string, fare?: string): HTMLElement {
   return h(
     'div',
-    { class: `verdict verdict--${result.accepted ? 'ok' : 'bad'}` },
-    h('div', { class: 'verdict__head' }, result.accepted ? 'Concession valid' : 'Not accepted'),
+    { class: `verdict verdict--${result.accepted ? 'ok' : 'bad'}`, role: 'status' },
+    h('div', { class: 'verdict__head' },
+      h('span', { class: 'verdict__glyph', 'aria-hidden': 'true' }, result.accepted ? '\u2713' : '\u2717'),
+      h('span', {}, result.accepted ? 'Concession valid' : 'Not accepted')),
+    fare ? h('div', { class: 'verdict__fare' }, fare) : null,
     h('div', { class: 'verdict__why' }, REASON_TEXT[result.reason]),
     h(
       'div',

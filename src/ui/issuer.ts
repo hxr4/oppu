@@ -1,8 +1,8 @@
 import { h, clear, toast } from './dom';
 import { panel, pill, tile, type AppCtx } from './shared';
-import { classesIn, dayToDate, serialHex } from '../engine/credential';
+import { MAX_STATUS_AGE_DAYS, classesIn, dayNumber, dayToDate, serialHex } from '../engine/credential';
 import { entitledRouteLabel } from '../engine/entitlement';
-import { revokeStudent, restoreStudent, trustBundleSize } from '../engine/world';
+import { revokeStudent, restoreStudent, trustBundleBytes, refreshStatus } from '../engine/world';
 import { hex } from '../engine/crypto';
 
 export function issuerView(ctx: AppCtx): HTMLElement {
@@ -18,7 +18,7 @@ export function issuerView(ctx: AppCtx): HTMLElement {
     tilesHost.appendChild(tile(String(ctx.world.institutions.length), 'Institutions in the trust list'));
     tilesHost.appendChild(tile(String(active), 'Active passes'));
     tilesHost.appendChild(tile(String(revoked), 'Revoked passes'));
-    tilesHost.appendChild(tile(`${(trustBundleSize(ctx.world) / 1024).toFixed(2)} kB`, 'Everything a bus needs to hold'));
+    tilesHost.appendChild(tile(`${(trustBundleBytes(ctx.world) / 1024).toFixed(2)} kB`, 'Everything a bus needs to hold'));
     void serials;
   }
 
@@ -47,11 +47,12 @@ export function issuerView(ctx: AppCtx): HTMLElement {
                   void (async () => {
                     if (student.revoked) {
                       await restoreStudent(ctx.world, student);
-                      toast(`${student.name}'s pass restored — the digest was re-signed.`);
+                      toast(`${student.name}'s pass restored and a fresh status token issued.`);
                     } else {
                       await revokeStudent(ctx.world, student);
-                      toast(`${student.name}'s pass revoked. Every scanner rejects it once the digest reaches it.`);
+                      toast(`${student.name}'s pass revoked. It stops getting status tokens, so it dies within ${MAX_STATUS_AGE_DAYS} days everywhere — and today, on any bus carrying the emergency list.`);
                     }
+                    ctx.save();
                     renderList();
                     renderTiles();
                     renderTrust();
@@ -62,6 +63,11 @@ export function issuerView(ctx: AppCtx): HTMLElement {
             ),
           ),
           h('div', { class: 'note' }, `${institution?.name ?? ''} · ${student.course}`),
+          h('div', { class: 'note' },
+            (() => {
+              const age = dayNumber(Date.now()) - student.status.day;
+              return `status confirmed ${age <= 0 ? 'today' : `${age} day${age === 1 ? '' : 's'} ago`}${age > MAX_STATUS_AGE_DAYS ? ' — outside the window, this pass is already refused' : ''}`;
+            })()),
           h(
             'div',
             { class: 'note' },
@@ -80,13 +86,21 @@ export function issuerView(ctx: AppCtx): HTMLElement {
         'div',
         { class: 'prose' },
         h('p', {},
-          'A scanner trusts one key: the transport authority root. Every institution key is countersigned by it, so ' +
-          'adding a college is a signature, not a database migration, and a forged college key fails on the bus with no network in sight.'),
+          'A scanner trusts one key: the transport authority root. Every institution key and every conductor device ' +
+          'is countersigned by it, so adding a college is a signature, not a database migration, and a forged key ' +
+          'fails on the bus with no network in sight.'),
       ),
     );
     const kv = h('dl', { class: 'kv' });
     kv.appendChild(h('dt', {}, 'Root key'));
     kv.appendChild(h('dd', { class: 'mono' }, `${hex(root.slice(1, 9), 2)} …`));
+    kv.appendChild(h('dt', {}, 'Conductor'));
+    kv.appendChild(
+      h('dd', {},
+        h('span', {}, `${ctx.world.conductor.id} (${ctx.world.conductor.depotCode}) — `),
+        h('span', { class: 'mono', style: 'font-size:11.5px' }, `key ${ctx.world.conductor.keyIdHex}`),
+      ),
+    );
     for (const inst of ctx.world.institutions) {
       kv.appendChild(h('dt', {}, inst.code));
       kv.appendChild(
@@ -98,19 +112,43 @@ export function issuerView(ctx: AppCtx): HTMLElement {
     }
     trustHost.appendChild(kv);
 
+    trustHost.appendChild(
+      h('div', { class: 'prose' },
+        h('h3', {}, 'Two revocation paths, different jobs'),
+        h('p', {},
+          `Ordinarily a revoked pass simply stops receiving status tokens, and every bus in the state refuses it ` +
+          `within ${MAX_STATUS_AGE_DAYS} days with nothing distributed to anyone. The signed list below is the ` +
+          'emergency path for the same day, and it only ever needs to carry a handful of serials.'),
+      ),
+    );
+
     const digests = ctx.world.revocations;
     trustHost.appendChild(
       h('div', {},
-        h('div', { class: 'eyebrow', style: 'margin-bottom:6px' }, 'Signed revocation digest'),
+        h('div', { class: 'eyebrow', style: 'margin-bottom:6px' }, 'Same-day emergency list'),
         digests.length
           ? h('div', { class: 'prose' },
             ...digests.map((d) =>
               h('p', { class: 'mono', style: 'font-size:11.5px;color:var(--ink-2)' },
                 `${d.instKeyIdHex} · ${dayToDate(d.epochDay).toLocaleDateString('en-IN')} · ${d.serialsHex.length} serial(s) · sig ${hex(d.signature.slice(0, 6), 2)}…`)))
-          : h('p', { class: 'note' }, 'Nothing revoked. The digest a bus carries is empty and still signed.'),
+          : h('p', { class: 'note' }, 'Nothing revoked. The emergency list a bus carries is empty and still signed.'),
       ),
     );
   }
+
+  const refreshAll = h('button', {
+    class: 'btn btn--ghost btn--sm',
+    type: 'button',
+    onclick: () => {
+      void (async () => {
+        let n = 0;
+        for (const st of ctx.world.students) if (await refreshStatus(ctx.world, st)) n += 1;
+        toast(`${n} status tokens re-issued. Revoked passes were refused.`);
+        renderList();
+        ctx.save();
+      })();
+    },
+  }, 'Re-issue today\u2019s status tokens');
 
   renderTiles();
   renderList();
@@ -123,8 +161,7 @@ export function issuerView(ctx: AppCtx): HTMLElement {
     h(
       'div',
       { class: 'grid grid--work' },
-      panel('Issued passes', 'Institution console', listHost,
-        h('span', { class: 'note' }, 'revocation takes effect on the next digest sync')),
+      panel('Issued passes', 'Institution console', listHost, refreshAll),
       panel('Trust list on every scanner', 'Keys', trustHost),
     ),
   );

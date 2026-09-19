@@ -1,12 +1,14 @@
 import { h, clear, toast, fmtAgo } from './dom';
 import { panel, pill, stepList, verdictBox, rupees, type AppCtx } from './shared';
 import { decodeFrame } from '../engine/qr';
+import { verifyBeacon } from '../engine/clock';
 import {
   SERVICE_CLASSES, proofToText, serialHex, textToProof, verifyProof,
   type ServiceClass, type VerifyResult,
 } from '../engine/credential';
 import { onEntitledRoute } from '../engine/entitlement';
 import { recordReceipt } from '../engine/world';
+import { deviceClock } from '../engine/clock';
 import { DEPOTS } from '../data/depots';
 
 interface BarcodeDetectorLike {
@@ -26,7 +28,7 @@ export function scannerView(ctx: AppCtx): HTMLElement {
 
   const pasteBox = h('textarea', {
     id: 'oppu-paste',
-    placeholder: 'OPPU1:…',
+    placeholder: 'OPPU2:…',
     spellcheck: false,
   });
 
@@ -46,39 +48,38 @@ export function scannerView(ctx: AppCtx): HTMLElement {
     const result: VerifyResult = await verifyProof(proof, {
       trust: ctx.world.trust,
       revocations: ctx.world.revocations,
-      nowMs: Date.now(),
+      nowMs: deviceClock.now(),
       serviceClass,
       boardingDepot,
       routeCheck: onEntitledRoute,
+      clockNote: deviceClock.note(),
     });
 
     let receiptNote = '';
-    if (result.accepted && result.fields && result.institution) {
-      const receipt = await recordReceipt(
-        ctx.world,
-        serialHex(result.fields),
-        result.institution.code,
-        boardingDepot,
-        result.fields.instDepot,
-        serviceClass,
-      );
-      receiptNote = `${rupees(receipt.fareConcession)} collected, ${rupees(receipt.subsidy)} carried as subsidy`;
+    if (result.accepted && result.fields) {
+      const serial = serialHex(result.fields);
+      const student = ctx.world.students.find((st) => serialHex(st.credential.fields) === serial);
+      if (student) {
+        const receipt = await recordReceipt(ctx.world, student, boardingDepot, serviceClass, deviceClock.now());
+        receiptNote = `${rupees(receipt.fareConcession)} to collect \u00b7 ${rupees(receipt.subsidy)} carried as subsidy`;
+      }
     } else if (result.fields) {
       ctx.world.rejections.push({
         serialHex: serialHex(result.fields),
         reason: result.reason,
-        ts: Date.now(),
+        ts: deviceClock.now(),
         depot: boardingDepot,
       });
     }
 
     clear(verdictHost);
-    verdictHost.appendChild(verdictBox(result, source));
+    verdictHost.appendChild(verdictBox(result, source, receiptNote || undefined));
     if (receiptNote) {
-      verdictHost.appendChild(h('p', { class: 'note' }, `Signed receipt queued — ${receiptNote}.`));
+      verdictHost.appendChild(h('p', { class: 'note' }, 'A signed receipt is queued for the depot.'));
     }
-    verdictHost.appendChild(stepList(result));
+    verdictHost.appendChild(stepList(result, true));
     renderQueue();
+    ctx.save();
   }
 
   function renderQueue(): void {
@@ -174,6 +175,49 @@ export function scannerView(ctx: AppCtx): HTMLElement {
     clear(cameraHost);
   }
 
+  const clockRow = h('div', { class: 'field' });
+
+  function renderClock(): void {
+    clear(clockRow);
+    const drift = deviceClock.skewMinutes;
+    clockRow.appendChild(h('label', {}, 'This device\u2019s clock'));
+    clockRow.appendChild(
+      h('div', { class: 'row' },
+        h('select', {
+          'aria-label': 'Simulated clock drift',
+          style: 'width:auto',
+          onchange: (e: Event) => {
+            deviceClock.setSimulatedSkewMinutes(Number((e.target as HTMLSelectElement).value));
+            renderClock();
+          },
+        },
+          ...[0, 9, 45, -30].map((m) =>
+            h('option', { value: String(m), selected: m === drift },
+              m === 0 ? 'correct' : `${Math.abs(m)} min ${m > 0 ? 'fast' : 'slow'}`)),
+        ),
+        h('button', {
+          class: 'btn btn--ghost btn--sm',
+          type: 'button',
+          onclick: () => {
+            void (async () => {
+              const ok = await verifyBeacon(ctx.world.trust.rootPublicRaw, ctx.world.beacon);
+              if (!ok) return toast('Beacon signature did not verify.');
+              deviceClock.adopt(ctx.world.beacon);
+              toast('Signed depot time adopted. The operating-system clock no longer matters.');
+              renderClock();
+            })();
+          },
+        }, deviceClock.hasBeacon ? 'Re-sync depot time' : 'Sync signed depot time'),
+      ),
+    );
+    clockRow.appendChild(
+      h('p', { class: 'note' },
+        deviceClock.hasBeacon
+          ? `Using the depot\u2019s signed timestamp plus this device\u2019s monotonic counter. Its own clock is out by ${Math.round(deviceClock.driftSeconds())} s and that is now harmless.`
+          : 'With no synced beacon the scanner has to trust the operating-system clock. Set it wrong and watch a valid pass get rejected.'),
+    );
+  }
+
   const controls = h(
     'div',
     { class: 'panel__body' },
@@ -206,6 +250,7 @@ export function scannerView(ctx: AppCtx): HTMLElement {
       h('button', { class: 'btn btn--ghost', type: 'button', onclick: () => void startCamera() }, 'Use the camera'),
     ),
     cameraHost,
+    clockRow,
     h('div', { class: 'field' },
       h('label', { for: 'oppu-paste' }, 'Or paste a proof'),
       pasteBox,
@@ -224,6 +269,7 @@ export function scannerView(ctx: AppCtx): HTMLElement {
       'signed revocation digest — under two kilobytes in total — and that is enough to settle every pass in the state.'),
   );
   renderQueue();
+  renderClock();
 
   const root = h(
     'div',

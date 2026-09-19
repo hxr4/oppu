@@ -3,8 +3,11 @@ import { panel, pill, type AppCtx } from './shared';
 import { qrPath } from '../engine/qr';
 import { checkPhrase } from '../engine/crypto';
 import {
-  BUCKET_SECONDS, classesIn, dayToDate, makeProof, proofToText, serialHex,
+  BUCKET_SECONDS, MAX_STATUS_AGE_DAYS, classesIn, dayNumber, dayToDate,
+  makeProof, proofToText, serialHex,
 } from '../engine/credential';
+import { deviceClock } from '../engine/clock';
+import { refreshStatus } from '../engine/world';
 import { entitledRouteLabel } from '../engine/entitlement';
 import { DEPOTS } from '../data/depots';
 import { keralaMap } from './map';
@@ -39,8 +42,8 @@ export function walletView(ctx: AppCtx): HTMLElement {
   );
 
   async function drawProof(): Promise<void> {
-    const now = Date.now();
-    const proof = await makeProof(student.credential, student.deviceKeys.privateKey, now);
+    const now = deviceClock.now();
+    const proof = await makeProof(student.credential, student.status, student.deviceKeys.privateKey, now);
     currentProof = proof;
     const text = proofToText(proof);
     const { d, count } = qrPath(text, 'M');
@@ -55,12 +58,48 @@ export function walletView(ctx: AppCtx): HTMLElement {
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('d', d);
     svg.appendChild(path);
+    svg.addEventListener('click', () => openFullscreen(d, count, phrase));
+    svg.setAttribute('tabindex', '0');
+    svg.addEventListener('keydown', (ev) => {
+      const e = ev as KeyboardEvent;
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openFullscreen(d, count, phrase); }
+    });
     qrHost.appendChild(svg);
     qrHost.appendChild(h('span', { class: 'phrase' }, phrase));
     qrHost.appendChild(
       h('div', { class: 'note', style: 'text-align:center' },
         `${text.length} characters · ${count}×${count} modules · reissues every ${BUCKET_SECONDS} s`),
     );
+  }
+
+  function openFullscreen(d: string, count: number, phrase: string): void {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', `-2 -2 ${count + 4} ${count + 4}`);
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', 'Concession pass proof, enlarged for scanning');
+    const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    bg.setAttribute('x', '-2'); bg.setAttribute('y', '-2');
+    bg.setAttribute('width', String(count + 4)); bg.setAttribute('height', String(count + 4));
+    bg.setAttribute('fill', '#fff');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('fill', '#111');
+    svg.appendChild(bg);
+    svg.appendChild(path);
+    const overlay = h('div', { class: 'qrfull', role: 'dialog', 'aria-modal': 'true' },
+      svg,
+      h('span', { class: 'phrase' }, phrase),
+      h('p', {}, `${student.name} \u00b7 pass ${serialHex(student.credential.fields)} \u00b7 tap anywhere to close`),
+    );
+    const close = (): void => {
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+    };
+    const onKey = (e: KeyboardEvent): void => { if (e.key === 'Escape') close(); };
+    overlay.addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+    toast('Scan this with another phone\u2019s camera on the Conductor tab.');
   }
 
   function tickRotor(): void {
@@ -97,6 +136,8 @@ export function walletView(ctx: AppCtx): HTMLElement {
           ),
           student.revoked ? pill('pill--bad', 'revoked') : pill('pill--ok', 'active'),
         ),
+        h('div', { class: 'pass__micro', 'aria-hidden': 'true' },
+          `${serialHex(f).replace(/ /g, '')}\u00b7`.repeat(9)),
         h('div', {},
           h('div', { class: 'pass__name' }, student.name),
           h('div', { class: 'pass__name ml', style: 'font-size:15px;color:var(--ink-2)' }, student.malayalam),
@@ -119,7 +160,38 @@ export function walletView(ctx: AppCtx): HTMLElement {
     put('Device key', `${[...f.devicePublicRaw.slice(1, 7)].map((b) => b.toString(16).padStart(2, '0')).join(' ')} …`, true);
     put('Issuer key id', f.instKeyId.length ? [...f.instKeyId].map((b) => b.toString(16).padStart(2, '0')).join('') : '—', true);
 
+    const age = dayNumber(deviceClock.now()) - student.status.day;
+    kv.appendChild(h('dt', {}, 'Status checked'));
+    kv.appendChild(
+      h('dd', {},
+        age <= 0 ? 'today' : `${age} day${age === 1 ? '' : 's'} ago`,
+        h('span', { style: 'margin-left:8px' },
+          age > MAX_STATUS_AGE_DAYS
+            ? pill('pill--bad', `over the ${MAX_STATUS_AGE_DAYS}-day window`)
+            : pill('pill--ok', `within ${MAX_STATUS_AGE_DAYS} days`)),
+      ),
+    );
+
     detailHost.appendChild(kv);
+    detailHost.appendChild(
+      h('div', { class: 'row' },
+        h('button', {
+          class: 'btn btn--ghost btn--sm',
+          type: 'button',
+          onclick: () => {
+            void (async () => {
+              const ok = await refreshStatus(ctx.world, student, deviceClock.now());
+              toast(ok
+                ? 'Status refreshed — the institution re-signed this pass.'
+                : 'The institution refused: this pass is revoked.');
+              await render();
+              ctx.save();
+            })();
+          },
+        }, 'Check in with the institution'),
+        h('span', { class: 'note' }, 'what the wallet does whenever it has a network'),
+      ),
+    );
 
     clear(mapHost);
     mapHost.appendChild(
@@ -173,26 +245,31 @@ export function walletView(ctx: AppCtx): HTMLElement {
     { class: 'grid grid--wallet' },
     panel('Student wallet', 'On the phone', detailHost,
       h('span', { class: 'note' }, 'works with the network off')),
-    h('div', { style: 'display:grid;gap:18px' },
-      panel('Whose pass', 'Demo', h('div', { class: 'panel__body' },
-        h('div', { class: 'field' }, h('label', { for: 'oppu-student' }, 'Open a wallet'), picker),
-        h('div', { class: 'row' }, handBtn, copyBtn),
-        h('p', { class: 'note' },
-          'On a phone the conductor simply scans the screen. On a laptop, hand the proof across to the scanner tab — the bytes are identical either way.'),
-      )),
+    h('div', { class: 'grid grid--split' },
+      h('div', { style: 'display:grid;gap:18px' },
+        panel('Whose pass', 'Demo', h('div', { class: 'panel__body' },
+          h('div', { class: 'field' }, h('label', { for: 'oppu-student' }, 'Open a wallet'), picker),
+          h('div', { class: 'row' }, handBtn, copyBtn),
+          h('p', { class: 'note' },
+            'On a phone the conductor scans the screen \u2014 tap the code to blow it up first. On one laptop, hand ' +
+            'the proof across to the scanner tab; the bytes are identical either way.'),
+        )),
+        panel('What the QR actually carries', 'Protocol', h('div', { class: 'panel__body' },
+          h('div', { class: 'prose' },
+            h('p', {},
+              'A 297-byte envelope: the credential the institution signed, that signature, a 68-byte token saying the ' +
+              'institution has not revoked it, the current half-minute, and this device\u2019s signature over all of it. ' +
+              'No name, no roll number, no address \u2014 a conductor learns only that a valid student of a named ' +
+              'institution is boarding within their entitlement.'),
+            h('p', {},
+              'The device key was generated inside this browser as non-extractable and kept in its key store. It cannot ' +
+              'be exported, copied into a friend\u2019s phone, or lifted from a screenshot \u2014 and it is still the ' +
+              'same key after you reload this page.'),
+          ),
+        )),
+      ),
       panel('Entitled journey', 'Where the concession applies', mapHost,
         h('span', { class: 'note' }, 'home stop to institution')),
-      panel('What the QR actually carries', 'Protocol', h('div', { class: 'panel__body' },
-        h('div', { class: 'prose' },
-          h('p', {},
-            'A 229-byte envelope: the credential the institution signed, that signature, the current half-minute, ' +
-            'and this device’s signature over the two. No name, no roll number, no address — a conductor learns ' +
-            'only that a valid student of a named institution is boarding within their entitlement.'),
-          h('p', {},
-            'The device key was generated inside this browser as non-extractable. It cannot be exported, copied ' +
-            'into a friend’s phone, or lifted from a screenshot.'),
-        ),
-      )),
     ),
   );
 

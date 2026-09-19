@@ -14,6 +14,7 @@ export interface Receipt {
   subsidy: number;
   ts: number;
   conductorId: string;
+  conductorKeyIdHex: string;
   signatureB64: string;
   synced: boolean;
 }

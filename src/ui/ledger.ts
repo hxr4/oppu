@@ -2,6 +2,7 @@ import { h } from './dom';
 import { panel, pill, tile, rupees, type AppCtx } from './shared';
 import { horizontalBars, lineChart } from './charts';
 import { ANOMALY_LABEL, findAnomalies, reconcile } from '../engine/ledger';
+import { auditReceipts } from '../engine/world';
 import { DEPOTS } from '../data/depots';
 
 export function ledgerView(ctx: AppCtx): HTMLElement {
@@ -52,6 +53,21 @@ export function ledgerView(ctx: AppCtx): HTMLElement {
       ))),
   );
 
+  const auditRow = h('div', { class: 'row' },
+    h('button', {
+      class: 'btn btn--ghost btn--sm',
+      type: 'button',
+      onclick: () => {
+        void (async () => {
+          const r = await auditReceipts(ctx.world);
+          auditRow.lastElementChild!.textContent =
+            `${r.verified} of ${r.total} receipt signatures verified against enrolled conductor devices in ${r.elapsedMs} ms`;
+        })();
+      },
+    }, 'Verify every receipt signature'),
+    h('span', { class: 'note' }, 'an audit here is a signature check, not an inspection'),
+  );
+
   return h(
     'div',
     { style: 'display:grid;gap:18px' },
@@ -81,6 +97,7 @@ export function ledgerView(ctx: AppCtx): HTMLElement {
       h('p', { class: 'note' },
         'A conductor offline cannot know a pass is being used in two districts at once. The ledger can, the moment the receipts meet.'))),
     panel('Recent receipts', 'Audit trail', h('div', { class: 'panel__body' },
+      auditRow,
       h('div', { class: 'tablewrap' }, recent),
       h('p', { class: 'note' },
         `${summary.unsynced} of ${summary.boardings} receipts are still queued on a bus. Every one carries the conductor device’s signature.`))),

@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { concat, exportPublic, generateKeyPair, sha256, sign, u32 } from '../src/engine/crypto';
 import {
-  BODY_LEN, SIG_LEN, PROOF_LEN, currentBucket, dayNumber, encodeBody, decodeBody,
-  makeProof, proofToText, textToProof, serialHex, verifyProof,
-  type CredentialFields,
+  BODY_LEN, MAX_STATUS_AGE_DAYS, SIG_LEN, STATUS_LEN, PROOF_LEN, currentBucket, dayNumber,
+  encodeBody, decodeBody, issueStatus, makeProof, proofToText, textToProof, serialHex, verifyProof,
+  type CredentialFields, type StatusToken,
 } from '../src/engine/credential';
-import { buildWorld, revokeStudent } from '../src/engine/world';
+import { auditReceipts, buildWorld, refreshStatus, revokeStudent } from '../src/engine/world';
+import { DeviceClock, issueBeacon, verifyBeacon } from '../src/engine/clock';
+import { project, revocationCurve } from '../src/engine/scale';
 import { onEntitledRoute } from '../src/engine/entitlement';
 import { fareFor, findAnomalies, reconcile, type Receipt } from '../src/engine/ledger';
 import { DEPOTS } from '../src/data/depots';
@@ -26,7 +28,7 @@ const ctxFor = (over: Partial<Parameters<typeof verifyProof>[1]> = {}): Paramete
 
 const alice = world.students[0];
 const live = async (student = alice, at = Date.now()): Promise<Uint8Array> =>
-  makeProof(student.credential, student.deviceKeys.privateKey, at);
+  makeProof(student.credential, student.status, student.deviceKeys.privateKey, at);
 
 it('a live pass is accepted', async () => {
   const r = await verifyProof(await live(), ctxFor({ boardingDepot: alice.homeDepot }));
@@ -38,8 +40,9 @@ it('a live pass is accepted', async () => {
 it('the proof is the size the protocol claims', async () => {
   const proof = await live();
   assert.equal(proof.length, PROOF_LEN);
-  assert.equal(PROOF_LEN, 229);
-  assert.ok(proofToText(proof).length < 340);
+  assert.equal(PROOF_LEN, 297);
+  assert.equal(STATUS_LEN, 68);
+  assert.ok(proofToText(proof).length < 410);
 });
 
 it('proof text round-trips', async () => {
@@ -74,8 +77,11 @@ it('the credential copied onto another device is rejected', async () => {
   const impostor = await generateKeyPair(true);
   const bucket = currentBucket(Date.now());
   const bodyHash = await sha256(concat(alice.credential.body, alice.credential.issuerSignature));
-  const badSig = await sign(impostor.privateKey, concat(bodyHash, u32(bucket)));
-  const forged = concat(alice.credential.body, alice.credential.issuerSignature, u32(bucket), badSig);
+  const badSig = await sign(impostor.privateKey, concat(bodyHash, u32(alice.status.day), u32(bucket)));
+  const forged = concat(
+    alice.credential.body, alice.credential.issuerSignature,
+    u32(alice.status.day), alice.status.signature, u32(bucket), badSig,
+  );
   const r = await verifyProof(forged, ctxFor({ boardingDepot: alice.homeDepot }));
   assert.equal(r.reason, 'wrong_device');
 });
@@ -83,7 +89,7 @@ it('the credential copied onto another device is rejected', async () => {
 it('editing the expiry date breaks the institution signature', async () => {
   const proof = await live();
   const fields: CredentialFields = { ...alice.credential.fields, validToDay: alice.credential.fields.validToDay + 365 };
-  const forged = concat(encodeBody(fields), proof.slice(BODY_LEN, BODY_LEN + SIG_LEN), proof.slice(BODY_LEN + SIG_LEN));
+  const forged = concat(encodeBody(fields), proof.slice(BODY_LEN));
   const r = await verifyProof(forged, ctxFor({ boardingDepot: alice.homeDepot }));
   assert.equal(r.reason, 'tampered');
 });
@@ -94,9 +100,14 @@ it('a college the authority never signed is rejected', async () => {
   const fields: CredentialFields = { ...alice.credential.fields, devicePublicRaw: await exportPublic(device.publicKey) };
   const body = encodeBody(fields);
   const issuerSig = await sign(rogue.privateKey, body);
+  const day = dayNumber(Date.now());
+  const status = await issueStatus(rogue.privateKey, fields.serial, day);
   const bucket = currentBucket(Date.now());
-  const devSig = await sign(device.privateKey, concat(await sha256(concat(body, issuerSig)), u32(bucket)));
-  const r = await verifyProof(concat(body, issuerSig, u32(bucket), devSig), ctxFor({ boardingDepot: alice.homeDepot }));
+  const devSig = await sign(device.privateKey, concat(await sha256(concat(body, issuerSig)), u32(day), u32(bucket)));
+  const r = await verifyProof(
+    concat(body, issuerSig, u32(day), status.signature, u32(bucket), devSig),
+    ctxFor({ boardingDepot: alice.homeDepot }),
+  );
   assert.ok(r.reason === 'forged_issuer' || r.reason === 'tampered');
   assert.equal(r.accepted, false);
 });
@@ -109,7 +120,7 @@ it('an expired pass is rejected', async () => {
   assert.equal(r.reason, 'expired');
 });
 
-it('revocation takes effect with no network', async () => {
+it('emergency revocation takes effect with no network', async () => {
   const victim = world.students[3];
   const before = await verifyProof(await live(victim), ctxFor({ boardingDepot: victim.homeDepot }));
   assert.equal(before.accepted, true);
@@ -119,6 +130,94 @@ it('revocation takes effect with no network', async () => {
     boardingDepot: victim.homeDepot,
   }));
   assert.equal(after.reason, 'revoked');
+});
+
+it('a revoked pass also dies by starvation, with no list distributed', async () => {
+  const victim = world.students[3];
+  assert.equal(victim.revoked, true);
+  const refreshed = await refreshStatus(world, victim);
+  assert.equal(refreshed, false, 'the institution must refuse to re-sign a revoked pass');
+  const stale = await verifyProof(await live(victim), ctxFor({
+    revocations: [],
+    boardingDepot: victim.homeDepot,
+    nowMs: Date.now() + (MAX_STATUS_AGE_DAYS + 2) * 86_400_000,
+  }));
+  assert.equal(stale.reason, 'stale_status');
+});
+
+it('a status token older than the window is refused', async () => {
+  const inst = world.institutions.find((i) => i.code === alice.institutionCode)!;
+  const old: StatusToken = await issueStatus(
+    inst.privateKey!, alice.credential.fields.serial, dayNumber(Date.now()) - (MAX_STATUS_AGE_DAYS + 1),
+  );
+  const proof = await makeProof(alice.credential, old, alice.deviceKeys.privateKey, Date.now());
+  const r = await verifyProof(proof, ctxFor({ boardingDepot: alice.homeDepot }));
+  assert.equal(r.reason, 'stale_status');
+});
+
+it('a status token cannot be re-dated without the institution key', async () => {
+  const inst = world.institutions.find((i) => i.code === alice.institutionCode)!;
+  const old: StatusToken = await issueStatus(
+    inst.privateKey!, alice.credential.fields.serial, dayNumber(Date.now()) - 40,
+  );
+  const relabelled: StatusToken = { day: dayNumber(Date.now()), signature: old.signature };
+  const proof = await makeProof(alice.credential, relabelled, alice.deviceKeys.privateKey, Date.now());
+  const r = await verifyProof(proof, ctxFor({ boardingDepot: alice.homeDepot }));
+  assert.equal(r.reason, 'bad_status');
+});
+
+it('one student cannot borrow another student status token', async () => {
+  const other = world.students[1];
+  const proof = await makeProof(alice.credential, other.status, alice.deviceKeys.privateKey, Date.now());
+  const r = await verifyProof(proof, ctxFor({ boardingDepot: alice.homeDepot }));
+  assert.equal(r.reason, 'bad_status');
+});
+
+it('a signed time beacon survives a wrong device clock', async () => {
+  const beacon = await issueBeacon(world.rootKeys.privateKey, Date.now());
+  assert.equal(await verifyBeacon(world.trust.rootPublicRaw, beacon), true);
+  const clock = new DeviceClock();
+  clock.setSimulatedSkewMinutes(9);
+  assert.ok(Math.abs(clock.osNow() - Date.now()) > 8 * 60_000);
+  clock.adopt(beacon);
+  assert.ok(Math.abs(clock.now() - Date.now()) < 2_000, 'beacon time must track real time');
+  assert.ok(clock.driftSeconds() > 500);
+  assert.ok((clock.note() ?? '').includes('9 min'));
+});
+
+it('a tampered beacon is rejected', async () => {
+  const beacon = await issueBeacon(world.rootKeys.privateKey, Date.now());
+  assert.equal(await verifyBeacon(world.trust.rootPublicRaw, { ...beacon, epochMs: Date.now() + 600_000 }), false);
+});
+
+it('every receipt verifies against an enrolled conductor device', async () => {
+  const audit = await auditReceipts(world);
+  assert.ok(audit.total > 50);
+  assert.equal(audit.verified, audit.total);
+  assert.equal(audit.failed.length, 0);
+});
+
+it('a receipt with an altered subsidy stops verifying', async () => {
+  const tampered = { ...world.receipts[0], subsidy: world.receipts[0].subsidy + 50 };
+  const saved = world.receipts[0];
+  world.receipts[0] = tampered;
+  const audit = await auditReceipts(world);
+  world.receipts[0] = saved;
+  assert.equal(audit.failed.length, 1);
+});
+
+it('the conductor device is countersigned by the authority root', () => {
+  assert.equal(world.trust.conductors.length, 1);
+  assert.equal(world.trust.conductors[0].rootSignature.length, SIG_LEN);
+  assert.equal(world.receipts[0].conductorKeyIdHex, world.conductor.keyIdHex);
+});
+
+it('status tokens keep the bus payload flat as the state grows', () => {
+  const p = project();
+  assert.equal(p.statusRevocationBytesPerBus, 0);
+  const curve = revocationCurve();
+  assert.ok(curve[curve.length - 1].listKb > 500, 'a serial list at state scale is hundreds of kB');
+  assert.ok(p.proofBytes < 320);
 });
 
 it('a class of service outside the entitlement is rejected', async () => {
@@ -145,7 +244,7 @@ it('the entitled route covers the line between home and institution', () => {
 
 it('garbage bytes are rejected without throwing', async () => {
   const junk = new Uint8Array(PROOF_LEN);
-  junk[0] = 1;
+  junk[0] = 2;
   const r = await verifyProof(junk, ctxFor());
   assert.equal(r.accepted, false);
   assert.equal(r.reason, 'unknown_issuer');
@@ -186,7 +285,7 @@ it('the same pass in two districts within the hour is flagged', () => {
     id: `T-${minutes}`, serialHex: 'AAAA BBBB', instCode: 'CHT',
     boardingDepot: DEPOTS.findIndex((d) => d.code === depotCode),
     serviceClass: 'Ordinary', km: 10, fareOrdinary: 16, fareConcession: 6, subsidy: 10,
-    ts: now + minutes * 60_000, conductorId: 'X', signatureB64: 'x', synced: true,
+    ts: now + minutes * 60_000, conductorId: 'X', conductorKeyIdHex: 'ffffffff', signatureB64: 'x', synced: true,
   });
   const flags = findAnomalies([mk('KKD', 0), mk('TVM', 35)], []);
   assert.ok(flags.some((f) => f.kind === 'impossible_travel'));
@@ -198,7 +297,7 @@ it('a fourth trip on a two-trip entitlement is flagged', () => {
   const mk = (i: number): Receipt => ({
     id: `C-${i}`, serialHex: 'CCCC DDDD', instCode: 'NLP', boardingDepot: 0,
     serviceClass: 'Ordinary', km: 8, fareOrdinary: 14, fareConcession: 6, subsidy: 8,
-    ts: day.getTime() + i * 90 * 60_000, conductorId: 'X', signatureB64: 'x', synced: true,
+    ts: day.getTime() + i * 90 * 60_000, conductorId: 'X', conductorKeyIdHex: 'ffffffff', signatureB64: 'x', synced: true,
   });
   const flags = findAnomalies([mk(0), mk(1), mk(2), mk(3)], []);
   assert.ok(flags.some((f) => f.kind === 'over_daily_cap'));
