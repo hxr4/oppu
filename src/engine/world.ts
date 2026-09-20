@@ -1,5 +1,15 @@
 import {
-  b64u, exportPublic, generateKeyPair, hex, importPublic, keyId, randomBytes, sign, unb64u, verify,
+  b64u,
+  exportPublic,
+  generateKeyPair,
+  hex,
+  importKeyPair,
+  importPublic,
+  keyId,
+  randomBytes,
+  sign,
+  unb64u,
+  verify,
 } from './crypto';
 import {
   MAX_STATUS_AGE_DAYS, dayNumber, issueCredential, issueStatus, serialHex, signRevocation,
@@ -8,6 +18,7 @@ import {
 } from './credential';
 import { issueBeacon, type TimeBeacon } from './clock';
 import { DEPOTS } from '../data/depots';
+import { DEMO_ROOT, DEMO_INSTITUTIONS } from '../data/demo-keys';
 import { haversineKm } from './geo';
 import { fareFor, type Receipt } from './ledger';
 

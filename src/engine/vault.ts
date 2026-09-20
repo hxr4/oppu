@@ -2,7 +2,7 @@ import type { World } from './world';
 
 const DB_NAME = 'oppu';
 const STORE = 'vault';
-const KEY = 'world.v2';
+const KEY = 'world.v3';
 
 /**
  * CryptoKey objects are structured-cloneable, and a key generated as

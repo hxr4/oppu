@@ -62,6 +62,29 @@ export async function generateKeyPair(extractable = true): Promise<CryptoKeyPair
   return subtle.generateKey(ALG, extractable, ['sign', 'verify']) as Promise<CryptoKeyPair>;
 }
 
+export async function importKeyPair(
+  priv: JsonWebKey,
+  pub: JsonWebKey,
+): Promise<CryptoKeyPair> {
+  const privateKey = await subtle.importKey(
+    'jwk',
+    priv,
+    ALG,
+    true,
+    ['sign'],
+  );
+
+  const publicKey = await subtle.importKey(
+    'jwk',
+    pub,
+    ALG,
+    true,
+    ['verify'],
+  );
+
+  return { privateKey, publicKey };
+}
+
 export async function exportPublic(key: CryptoKey): Promise<Uint8Array> {
   return new Uint8Array(await subtle.exportKey('raw', key));
 }
