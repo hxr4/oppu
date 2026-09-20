@@ -86,12 +86,18 @@ const STUDENT_SEEDS: StudentSeed[] = [
 ];
 
 export async function buildWorld(nowMs = Date.now()): Promise<World> {
-  const rootKeys = await generateKeyPair(true);
+  const rootKeys = await importKeyPair(
+    DEMO_ROOT.priv,
+    DEMO_ROOT.pub,
+  );
   const rootPublicRaw = await exportPublic(rootKeys.publicKey);
 
   const institutions: Institution[] = [];
   for (const seed of INSTITUTION_SEEDS) {
-    const keys = await generateKeyPair(true);
+    const keys = await importKeyPair(
+      DEMO_INSTITUTIONS[seed.code as keyof typeof DEMO_INSTITUTIONS].priv,
+      DEMO_INSTITUTIONS[seed.code as keyof typeof DEMO_INSTITUTIONS].pub,
+    );
     const publicRaw = await exportPublic(keys.publicKey);
     const id = await keyId(publicRaw);
     const record = new TextEncoder().encode(`${seed.code}|${seed.name}|${b64u(publicRaw)}`);
