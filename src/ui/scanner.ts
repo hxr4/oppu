@@ -304,6 +304,7 @@ export function scannerView(ctx: AppCtx): HTMLElement {
       h('button', { class: 'btn btn--ghost', type: 'button', onclick: () => void startCamera() }, 'Use the camera'),
     ),
     cameraHost,
+    camStatus,
     clockRow,
     h('div', { class: 'field' },
       h('label', { for: 'oppu-paste' }, 'Or paste a proof'),
